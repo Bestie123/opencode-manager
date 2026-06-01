@@ -8,6 +8,8 @@ import threading
 import os
 import json
 import shutil
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1100,6 +1102,9 @@ class App(tk.Tk):
             messagebox.showwarning("Внимание", "Не выбраны сессии")
             return
 
+        if self._check_opencode():
+            return
+
         titles = [self._session_map[iid].title[:40] for iid in sel if iid in self._session_map]
         preview = "\n".join(f"  - {t}" for t in titles[:10])
         if len(titles) > 10:
@@ -1139,6 +1144,8 @@ class App(tk.Tk):
         self.after(0, _do)
 
     def _strip_all_reasoning(self):
+        if self._check_opencode():
+            return
         if not messagebox.askyesno("Подтверждение",
                                     "Удалить reasoning из ВСЕХ сессий?\n\nЭто уберёт ~77% размера БД."):
             return
@@ -1154,6 +1161,8 @@ class App(tk.Tk):
         sel = self.tree.selection()
         if not sel:
             messagebox.showwarning("Внимание", "Не выбраны сессии")
+            return
+        if self._check_opencode():
             return
         if not messagebox.askyesno("Подтверждение",
                                     f"Удалить reasoning из {len(sel)} выбранных сессий?"):
@@ -1172,6 +1181,43 @@ class App(tk.Tk):
             self.after(10, self._load_sessions)
         threading.Thread(target=do, daemon=True).start()
 
+    def _is_opencode_running(self) -> list[str]:
+        """Check if any OpenCode process is running. Returns list of process names found."""
+        found = []
+        procs = ["OpenCode.exe", "OpenCode", "opencode.exe", "opencode"]
+        for p in procs:
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     f"Get-Process -Name '{p}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.stdout.strip():
+                    found.append(p)
+            except Exception:
+                pass
+        return found
+
+    def _warn_opencode_running(self, process_names: list[str]):
+        """Show warning popup + play sound if opencode is running."""
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONHAND)
+        names = ", ".join(process_names)
+        messagebox.showwarning(
+            "OpenCode запущен",
+            f"Обнаружен запущенный процесс: {names}\n\n"
+            f"Перед этой операцией закройте OpenCode полностью.\n"
+            f"Иначе изменения могут быть потеряны или база данных будет повреждена."
+        )
+
+    def _check_opencode(self) -> bool:
+        """Returns True if blocked (opencode running), False if ok to proceed."""
+        running = self._is_opencode_running()
+        if running:
+            self._warn_opencode_running(running)
+            return True
+        return False
+
     def _change_session_directory(self):
         sel = self.tree.selection()
         if len(sel) != 1:
@@ -1180,6 +1226,10 @@ class App(tk.Tk):
         session = self._session_map.get(sel[0])
         if not session:
             return
+
+        if self._check_opencode():
+            return
+
         new_dir = filedialog.askdirectory(title=f"Новый проект для: {session.title[:40]}",
                                           initialdir=session.directory if session.directory else "")
         if not new_dir:
@@ -1187,7 +1237,6 @@ class App(tk.Tk):
         if new_dir == session.directory:
             return
         if self.db.update_session_directory(session.id, new_dir):
-            # Get updated session info to show project name
             updated = self.db.get_session(session.id)
             proj_label = updated.directory if updated else new_dir
             self.status_var.set(f"Сессия перенесена: {session.title[:30]} -> {proj_label}")
@@ -1197,6 +1246,8 @@ class App(tk.Tk):
             messagebox.showerror("Ошибка", "Не удалось обновить директорию сессии")
 
     def _delete_old_sessions(self):
+        if self._check_opencode():
+            return
         if not messagebox.askyesno("Подтверждение", "Удалить все сессии старше 30 дней?"):
             return
         self._log("Удаление сессий старше 30 дней...")
@@ -1216,6 +1267,8 @@ class App(tk.Tk):
         threading.Thread(target=do, daemon=True).start()
 
     def _delete_subagent_sessions(self):
+        if self._check_opencode():
+            return
         sessions = self.db.get_sessions()
         subagent = [s for s in sessions if s.is_subagent]
         if not subagent:
@@ -1235,6 +1288,8 @@ class App(tk.Tk):
         threading.Thread(target=do, daemon=True).start()
 
     def _clean_snapshots(self):
+        if self._check_opencode():
+            return
         if not messagebox.askyesno("Подтверждение",
                                     "Удалить все директории снапшотов?\n\nOpenCode пересоздаст их при необходимости."):
             return
@@ -1245,6 +1300,8 @@ class App(tk.Tk):
         threading.Thread(target=do, daemon=True).start()
 
     def _clean_orphans(self):
+        if self._check_opencode():
+            return
         self._log("Очистка осиротевших diff'ов...")
         def do():
             count = self.db.clean_orphan_diffs()
@@ -1252,6 +1309,8 @@ class App(tk.Tk):
         threading.Thread(target=do, daemon=True).start()
 
     def _vacuum_db(self):
+        if self._check_opencode():
+            return
         if not messagebox.askyesno("Подтверждение",
                                     "Выполнить VACUUM базы данных?\n\n"
                                     "Это освободит место, но временно удвоит размер БД.\n"
@@ -1272,6 +1331,8 @@ class App(tk.Tk):
         threading.Thread(target=do, daemon=True).start()
 
     def _keep_latest_n(self):
+        if self._check_opencode():
+            return
         try:
             n = int(self.keep_n_var.get())
         except ValueError:
