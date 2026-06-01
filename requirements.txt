@@ -1,0 +1,8 @@
+# OpenCode Session Manager
+# No external dependencies required - uses only Python stdlib
+# - tkinter (built-in)
+# - sqlite3 (built-in)
+# - subprocess (built-in)
+# - threading (built-in)
+# - pathlib (built-in)
+# - json (built-in)
