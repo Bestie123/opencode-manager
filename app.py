@@ -160,10 +160,11 @@ class App(tk.Tk):
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 
-        columns = ("title", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model")
+        columns = ("title", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
 
         self.tree.heading("title", text="Название", command=lambda: self._sort_sessions("title"))
+        self.tree.heading("directory", text="Директория", command=lambda: self._sort_sessions("directory"))
         self.tree.heading("size", text="Размер", command=lambda: self._sort_sessions("size"))
         self.tree.heading("messages", text="Сообщ.", command=lambda: self._sort_sessions("messages"))
         self.tree.heading("tokens_in", text="Tokens In", command=lambda: self._sort_sessions("tokens_in"))
@@ -172,7 +173,8 @@ class App(tk.Tk):
         self.tree.heading("age", text="Возраст", command=lambda: self._sort_sessions("age"))
         self.tree.heading("model", text="Модель", command=lambda: self._sort_sessions("model"))
 
-        self.tree.column("title", width=320, minwidth=150)
+        self.tree.column("title", width=250, minwidth=120)
+        self.tree.column("directory", width=200, minwidth=100)
         self.tree.column("size", width=80, minwidth=60, stretch=False)
         self.tree.column("messages", width=70, minwidth=40, stretch=False)
         self.tree.column("tokens_in", width=90, minwidth=60, stretch=False)
@@ -215,11 +217,11 @@ class App(tk.Tk):
             self._session_sort_asc = True
 
         # Update header arrows
-        for c in ("title", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model"):
+        for c in ("title", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model"):
             arrow = ""
             if c == self._session_sort_col:
                 arrow = " ▲" if self._session_sort_asc else " ▼"
-            label = {"title": "Название", "size": "Размер", "messages": "Сообщ.",
+            label = {"title": "Название", "directory": "Директория", "size": "Размер", "messages": "Сообщ.",
                      "tokens_in": "Tokens In", "tokens_out": "Tokens Out",
                      "reasoning": "Reasoning", "age": "Возраст", "model": "Модель"}[c]
             self.tree.heading(c, text=label + arrow)
@@ -982,8 +984,14 @@ class App(tk.Tk):
             model = m.get("id", s.model)
         except:
             pass
+        # Shorten directory path for display
+        directory = s.directory or ""
+        if directory.startswith("Q:\\User_Data\\Desktop\\"):
+            directory = directory[22:]
+        elif directory.startswith("C:\\Users\\"):
+            directory = "~" + directory[11:]
         iid = self.tree.insert("", tk.END, values=(
-            s.title[:60], s.size_str, s.message_count,
+            s.title[:60], directory, s.size_str, s.message_count,
             f"{s.tokens_input:,}", f"{s.tokens_output:,}",
             f"{s.tokens_reasoning:,}", s.age_str, model
         ))

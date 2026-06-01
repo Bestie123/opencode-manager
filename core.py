@@ -176,6 +176,7 @@ class OpenCodeDB:
         # SQL-side sorting for columns that map directly to DB fields
         sql_sort_map = {
             "title": ("title", ascending),
+            "directory": ("directory", ascending),
             "age": ("time_created", ascending),
             "tokens_in": ("tokens_input", ascending),
             "tokens_out": ("tokens_output", ascending),
