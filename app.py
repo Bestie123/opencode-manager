@@ -1234,6 +1234,9 @@ class App(tk.Tk):
                                           initialdir=session.directory if session.directory else "")
         if not new_dir:
             return
+        # Normalize: tkinter может вернуть forward slashes на Windows
+        if os.name == 'nt':
+            new_dir = new_dir.replace('/', '\\')
         if new_dir == session.directory:
             return
         if self.db.update_session_directory(session.id, new_dir):
