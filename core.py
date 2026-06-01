@@ -364,6 +364,9 @@ class OpenCodeDB:
         conn = self.connect(readonly=False)
         c = conn.cursor()
         try:
+            # Normalize directory separators (tkinter may return forward slashes on Windows)
+            if os.name == 'nt':
+                new_directory = new_directory.replace('/', '\\')
             new_project_id = self._resolve_project_id(new_directory)
             new_path = new_directory.replace("\\", "/")
 
