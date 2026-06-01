@@ -78,9 +78,26 @@ State-файлы Desktop-приложения находятся в `%APPDATA%\a
 - `default.dat` — кэш настроек UI
 - `opencode.settings` — `{"tauriMigrated": true}`
 
-## Исправления
+## Изменения в коде (app.py + core.py)
 
-### Fix 0: Нормализация пути из `filedialog` (app.py + core.py)
+### 1. Столбец «Директория» в таблице сессий
+
+Добавлена колонка `directory` между «Название» и «Размер»:
+- Показывает путь к проекту сессии
+- Автоматически сокращает `Q:\User_Data\Desktop\...` → `имя_папки`
+- Клик по заголовку — сортировка SQL-side
+- `core.py`: `get_sessions()` — добавлен `"directory": ("directory", ascending)` в `sql_sort_map`
+
+### 2. Блокировка при запущенном OpenCode
+
+Все destructive-операции проверяют, запущен ли OpenCode:
+- `_is_opencode_running()` — опрос `Get-Process` через PowerShell
+- `_warn_opencode_running()` — warning + `winsound.MessageBeep()`
+- `_check_opencode()` — универсальный guard (возвращает True = заблокировано)
+
+Защищены: `_change_session_directory`, `_delete_selected`, `_strip_all_reasoning`, `_strip_selected_reasoning`, `_delete_old_sessions`, `_delete_subagent_sessions`, `_clean_snapshots`, `_clean_orphans`, `_vacuum_db`, `_keep_latest_n`.
+
+### 3. Нормализация пути из `filedialog` (app.py + core.py)
 
 **Проблема:** Tkinter `askdirectory()` на Windows может вернуть путь с forward slashes (`Q:/.../Новая папка (3)`), особенно при наличии не-ASCII символов. Это ломает формат колонки `directory` (должна быть с backslashes).
 
@@ -221,6 +238,34 @@ Copy-Item -Path "$env:APPDATA\ai.opencode.desktop\*.dat" -Destination $backup
 8. **Tkinter `filedialog` возвращает `/` на Windows.** `askdirectory()` может вернуть путь с forward slashes, особенно с не-ASCII символами. Нормализовать через `.replace('/', '\\')`.
 9. **OpenCode должен быть закрыт при операциях с БД.** Добавлена блокировка с warning + звук.
 10. **Subagent-сессии двигаются вместе с родителем.** `update_session_directory` обновляет `WHERE parent_id = ?`.
+
+## Известные баги OpenCode и их обход
+
+### 1. Tkinter `filedialog.askdirectory()` → forward slashes на Windows
+**Симптом:** `directory` колонка в БД содержит `/` вместо `\`. Сессия не отображается.
+**Причина:** Tcl/Tk на Windows иногда возвращает POSIX-пути.
+**Исправление:** `.replace('/', '\\')` после диалога и в `update_session_directory`.
+
+### 2. Две БД: Desktop и CLI используют разные файлы
+**Симптом:** В Desktop одни сессии, в CLI другие.
+**Причина:** Канал (`latest` → `opencode.db` vs `dev` → `opencode-dev.db`).
+**Диагностика:** `opencode db path`.
+**Обход:** `OPENCODE_DISABLE_CHANNEL_DB=1` форсирует `opencode.db`.
+
+### 3. Tauri Store не переваривает UTF-8 BOM
+**Симптом:** `renderer.log: SyntaxError: Unexpected token 'ï»¿'`.
+**Причина:** JSON файл начинается с `EF BB BF`.
+**Исправление:** удалить BOM или удалить `.dat` файл (пересоздастся при запуске Desktop).
+
+### 4. Global project сбит (worktree, vcs)
+**Симптом:** нет ни одной сессии ни в одном проекте.
+**Причина:** `project` таблица содержит `worktree='...\опечатка'`, `vcs='git'`.
+**Исправление:** `UPDATE project SET worktree='/', vcs=NULL WHERE id='global'`.
+
+### 5. Copy-файлы сбивают `_detect_db_path`
+**Симптом:** Session Manager показывает не те сессии.
+**Причина:** `opencode - Копия (2).db` побеждает `opencode.db` по алфавиту.
+**Исправление:** приоритет `opencode.db` при равном счёте сессий.
 
 ## Какая БД к чему относится
 
