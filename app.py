@@ -850,20 +850,19 @@ class App(tk.Tk):
         chart_box.pack(fill=tk.X, padx=10, pady=5)
 
         components = [
-            ("БД", stats.db_size_bytes),
+            ("БД", stats.db_size_bytes + stats.wal_size_bytes),
             ("Diffs", stats.session_diff_size_bytes),
             ("Снапшоты", stats.snapshot_size_bytes),
         ]
         total = sum(c[1] for c in components) or 1
-        bar_frame = ttk.Frame(chart_box)
-        bar_frame.pack(fill=tk.X)
         for name, size in components:
             pct = (size / total) * 100
-            row = ttk.Frame(bar_frame)
-            row.pack(fill=tk.X, pady=1)
-            ttk.Label(row, text=f"{name}:", width=15).pack(side=tk.LEFT)
-            bw = max(1, int(pct * 3))
-            ttk.Label(row, text="█" * bw + f" {pct:.1f}% ({self._fmt_size(size)})").pack(side=tk.LEFT, padx=5)
+            row = ttk.Frame(chart_box)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=f"{name}:", width=12).pack(side=tk.LEFT)
+            pb = ttk.Progressbar(row, value=pct, length=300)
+            pb.pack(side=tk.LEFT, padx=(5, 10))
+            ttk.Label(row, text=f"{pct:.1f}% ({self._fmt_size(size)})").pack(side=tk.LEFT)
 
         # Top sessions
         top_box = ttk.LabelFrame(frame, text="Топ-10 сессий по размеру", padding=10)
