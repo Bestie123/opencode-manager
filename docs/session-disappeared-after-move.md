@@ -80,6 +80,29 @@ State-файлы Desktop-приложения находятся в `%APPDATA%\a
 
 ## Исправления
 
+### Fix 0: Нормализация пути из `filedialog` (app.py + core.py)
+
+**Проблема:** Tkinter `askdirectory()` на Windows может вернуть путь с forward slashes (`Q:/.../Новая папка (3)`), особенно при наличии не-ASCII символов. Это ломает формат колонки `directory` (должна быть с backslashes).
+
+**Исправление в двух местах:**
+
+`app.py:1238-1239` — сразу после диалога, до передачи в core:
+```python
+if os.name == 'nt':
+    new_dir = new_dir.replace('/', '\\')
+```
+
+`core.py:368-369` — защита от других вызовов:
+```python
+if os.name == 'nt':
+    new_directory = new_directory.replace('/', '\\')
+```
+
+**SQL для фикса уже повреждённых сессий:**
+```sql
+UPDATE session SET directory = REPLACE(directory, '/', '\') WHERE directory LIKE '%/%';
+```
+
 ### Fix 1: `_detect_db_path` — приоритет `opencode.db` (core.py)
 
 ```python
@@ -148,7 +171,35 @@ Get-Content "$env:APPDATA\ai.opencode.desktop\logs\*\renderer.log" | Select-Stri
 
 **Критически важно:** при ручном редактировании `.dat` файлов НИКОГДА не писать с BOM. Tauri Store использует простой UTF-8.
 
-### Fix 5: Восстановление из бэкапа
+### Fix 5: Блокировка операций при запущенном OpenCode
+
+Все операции записи в БД (перенос, удаление, strip reasoning, vacuum) теперь проверяют, запущен ли OpenCode:
+
+```python
+def _is_opencode_running(self) -> list[str]:
+    procs = ["OpenCode.exe", "OpenCode", "opencode.exe", "opencode"]
+    for p in procs:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Get-Process -Name '{p}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.stdout.strip():
+            found.append(p)
+    return found
+```
+
+При обнаружении — warning + системный звук (`winsound.MessageBeep`):
+
+```
+OpenCode запущен
+Обнаружен запущенный процесс: OpenCode.exe
+Перед этой операцией закройте OpenCode полностью.
+```
+
+Добавлено во все destructive-операции: `_change_session_directory`, `_delete_selected`, `_strip_all_reasoning`, `_strip_selected_reasoning`, `_delete_old_sessions`, `_delete_subagent_sessions`, `_clean_snapshots`, `_clean_orphans`, `_vacuum_db`, `_keep_latest_n`.
+
+### Fix 6: Восстановление из бэкапа
 
 Перед любыми операциями с `.dat` файлами делать бэкап:
 
@@ -167,6 +218,9 @@ Copy-Item -Path "$env:APPDATA\ai.opencode.desktop\*.dat" -Destination $backup
 5. **Перезапуск приложения.** После изменения БД — полностью закрыть и перезапустить OpenCode.
 6. **Учёт двух OpenCode.** В системе ДВЕ копии OpenCode — Desktop (latest, opencode.db) и CLI/TUI (dev, opencode-dev.db). Это разные БД с разными сессиями.
 7. **BOM в JSON ломает Tauri Store.** При ручном редактировании `.dat` файлов — писать БЕЗ BOM (`EF BB BF`).
+8. **Tkinter `filedialog` возвращает `/` на Windows.** `askdirectory()` может вернуть путь с forward slashes, особенно с не-ASCII символами. Нормализовать через `.replace('/', '\\')`.
+9. **OpenCode должен быть закрыт при операциях с БД.** Добавлена блокировка с warning + звук.
+10. **Subagent-сессии двигаются вместе с родителем.** `update_session_directory` обновляет `WHERE parent_id = ?`.
 
 ## Какая БД к чему относится
 
