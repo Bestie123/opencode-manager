@@ -329,6 +329,9 @@ def _detect_db_path() -> str:
 
 ```python
 def update_session_directory(self, session_id, new_directory):
+    # Нормализация: tkinter на Windows может вернуть / вместо \
+    if os.name == 'nt':
+        new_directory = new_directory.replace('/', '\\')
     new_project_id = self._resolve_project_id(new_directory)
     new_path = new_directory.replace("\\", "/")
     
@@ -339,14 +342,32 @@ def update_session_directory(self, session_id, new_directory):
 ```
 
 **Правильная работа:**
-- `directory` = путь с backslashes (как вернул `filedialog.askdirectory()`)
+- `directory` = путь с backslashes (нормализован из `filedialog.askdirectory()`)
 - `path` = тот же путь с forward slashes
 - `project_id` = ID проекта, найденного по git-root, или `'global'`
-
-**Потенциальные проблемы:**
-- Если `new_directory` уже содержит forward slashes → нужно нормализовать
-- `_resolve_project_id()` возвращает `'global'` если проект не найден в таблице `project`
+- Потенциальные проблемы:
+- Если `_resolve_project_id` возвращает `'global'` если проект не найден в таблице `project`
 - После переноса сессия получает `project_id='global'` и исчезает из старого проекта
+
+### 5.5 Блокировка при запущенном OpenCode
+
+Все destructive-операции (`_change_session_directory`, `_delete_selected`, `_strip_*`, `_vacuum_db`, и т.д.) вызывают `_check_opencode()`, который:
+
+```python
+def _is_opencode_running(self) -> list[str]:
+    procs = ["OpenCode.exe", "OpenCode", "opencode.exe", "opencode"]
+    for p in procs:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Get-Process -Name '{p}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.stdout.strip():
+            found.append(p)
+    return found
+```
+
+При обнаружении — `winsound.MessageBeep(MB_ICONHAND)` + warning.
 
 ---
 
