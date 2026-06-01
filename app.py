@@ -174,7 +174,7 @@ class App(tk.Tk):
         self.tree.heading("model", text="Модель", command=lambda: self._sort_sessions("model"))
 
         self.tree.column("title", width=250, minwidth=120)
-        self.tree.column("directory", width=280, minwidth=120)
+        self.tree.column("directory", width=320, minwidth=160)
         self.tree.column("size", width=80, minwidth=60, stretch=False)
         self.tree.column("messages", width=70, minwidth=40, stretch=False)
         self.tree.column("tokens_in", width=90, minwidth=60, stretch=False)
@@ -984,12 +984,15 @@ class App(tk.Tk):
             model = m.get("id", s.model)
         except:
             pass
-        # Shorten directory path for display
+        # Shorten directory path for display: show last 2-3 components
         directory = s.directory or ""
-        if directory.startswith("Q:\\User_Data\\Desktop\\"):
-            directory = directory[22:]
-        elif directory.startswith("C:\\Users\\"):
-            directory = "~" + directory[11:]
+        sep = "\\"
+        parts = directory.split(sep)
+        if len(parts) > 3:
+            if parts[0].endswith(":"):  # Keep drive letter
+                directory = parts[0] + sep + "..." + sep + sep.join(parts[-2:])
+            else:
+                directory = "..." + sep + sep.join(parts[-2:])
         iid = self.tree.insert("", tk.END, values=(
             s.title[:60], directory, s.size_str, s.message_count,
             f"{s.tokens_input:,}", f"{s.tokens_output:,}",
