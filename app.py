@@ -25,6 +25,7 @@ class App(tk.Tk):
 
         self.db = OpenCodeDB()
         self.cli = OpenCodeCLI()
+        self._db_list = []
 
         self._config_path = Path.home() / ".opencode-manager" / "config.json"
         self._dark_mode = False
@@ -121,6 +122,14 @@ class App(tk.Tk):
         toolbar = ttk.Frame(frame)
         toolbar.pack(fill=tk.X, padx=5, pady=5)
 
+        ttk.Label(toolbar, text="БД:").pack(side=tk.LEFT, padx=(0, 3))
+        self.db_var = tk.StringVar()
+        self.db_combo = ttk.Combobox(toolbar, textvariable=self.db_var,
+                                      width=22, state="readonly")
+        self.db_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.db_combo.bind("<<ComboboxSelected>>", self._on_db_selected)
+        self._refresh_db_list()
+
         ttk.Label(toolbar, text="Сортировка:").pack(side=tk.LEFT, padx=(0, 5))
         self.sort_var = tk.StringVar(value="size")
         self.sort_labels = {"size": "По размеру", "age": "По дате", "name": "По имени"}
@@ -136,6 +145,9 @@ class App(tk.Tk):
         search_entry.pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(toolbar, text="Поиск:").pack(side=tk.LEFT)
 
+        self.subagent_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="Sub", variable=self.subagent_var,
+                        command=self._refresh_tree).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(toolbar, text="Обновить", command=self._load_sessions).pack(side=tk.RIGHT, padx=2)
 
         # Actions bar
@@ -151,19 +163,30 @@ class App(tk.Tk):
         ttk.Button(actions, text="Strip reasoning", command=self._strip_selected_reasoning).pack(side=tk.LEFT, padx=2)
         ttk.Button(actions, text="Открыть сообщения", command=self._open_messages_for_selected).pack(side=tk.LEFT, padx=2)
         ttk.Separator(actions, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        ttk.Button(actions, text="Перенести в проект", command=self._change_session_directory).pack(side=tk.LEFT, padx=2)
+        self._move_btn = ttk.Button(actions, text="Перенести в проект",
+                                     command=self._change_session_directory)
+        self._move_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Separator(actions, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        self._archive_btn = ttk.Button(actions, text="Архивировать",
+                                       command=self._archive_selected)
+        self._archive_btn.pack(side=tk.LEFT, padx=2)
+        self._unarchive_btn = ttk.Button(actions, text="Разархивировать",
+                                         command=self._unarchive_selected)
+        self._unarchive_btn.pack(side=tk.LEFT, padx=2)
 
         self.selected_label = ttk.Label(actions, text="Выбрано: 0")
         self.selected_label.pack(side=tk.RIGHT, padx=5)
 
-        # Treeview — с поддержкой выделения
+        # Treeview — иерархический (родитель-дочерние)
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 
-        columns = ("title", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        columns = ("children", "status", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings", selectmode="extended")
 
-        self.tree.heading("title", text="Название", command=lambda: self._sort_sessions("title"))
+        self.tree.heading("#0", text="Название", command=lambda: self._sort_sessions("title"))
+        self.tree.heading("children", text="Дочер.", command=lambda: self._sort_sessions("children"))
+        self.tree.heading("status", text="Сост.", command=lambda: self._sort_sessions("status"))
         self.tree.heading("directory", text="Директория", command=lambda: self._sort_sessions("directory"))
         self.tree.heading("size", text="Размер", command=lambda: self._sort_sessions("size"))
         self.tree.heading("messages", text="Сообщ.", command=lambda: self._sort_sessions("messages"))
@@ -173,8 +196,10 @@ class App(tk.Tk):
         self.tree.heading("age", text="Возраст", command=lambda: self._sort_sessions("age"))
         self.tree.heading("model", text="Модель", command=lambda: self._sort_sessions("model"))
 
-        self.tree.column("title", width=250, minwidth=120)
-        self.tree.column("directory", width=320, minwidth=160)
+        self.tree.column("#0", width=280, minwidth=130)
+        self.tree.column("children", width=55, minwidth=40, stretch=False)
+        self.tree.column("status", width=55, minwidth=40, stretch=False)
+        self.tree.column("directory", width=260, minwidth=110)
         self.tree.column("size", width=80, minwidth=60, stretch=False)
         self.tree.column("messages", width=70, minwidth=40, stretch=False)
         self.tree.column("tokens_in", width=90, minwidth=60, stretch=False)
@@ -189,6 +214,8 @@ class App(tk.Tk):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self.tree.tag_configure("subagent", foreground="#8b949e", font=("Consolas", 9, "italic"))
+
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -201,6 +228,22 @@ class App(tk.Tk):
     def _on_tree_select(self, event):
         sel = self.tree.selection()
         self.selected_label.config(text=f"Выбрано: {len(sel)}")
+        # Disable "move to project" for subagent sessions
+        has_subagent = False
+        any_archived = False
+        any_active = False
+        for iid in sel:
+            s = self._session_map.get(iid)
+            if s:
+                if s.parent_id:
+                    has_subagent = True
+                if s.is_archived:
+                    any_archived = True
+                else:
+                    any_active = True
+        self._move_btn.config(state=tk.DISABLED if has_subagent else tk.NORMAL)
+        self._archive_btn.config(state=tk.DISABLED if not any_active else tk.NORMAL)
+        self._unarchive_btn.config(state=tk.DISABLED if not any_archived else tk.NORMAL)
 
     def _on_tree_double_click(self, event):
         sel = self.tree.selection()
@@ -209,6 +252,37 @@ class App(tk.Tk):
             if session:
                 self._open_messages_for_session(session.id)
 
+    def _refresh_db_list(self):
+        self._db_list = OpenCodeDB.list_databases()
+        labels = [f"{label} ({count} сес.)" for path, label, count in self._db_list]
+        self.db_combo["values"] = labels
+        if self._db_list:
+            # Select current DB
+            current = self.db.db_path
+            for i, (path, label, count) in enumerate(self._db_list):
+                if path == current:
+                    self.db_combo.current(i)
+                    break
+            else:
+                self.db_combo.current(0)
+                self._switch_db(0)
+
+    def _on_db_selected(self, event=None):
+        idx = self.db_combo.current()
+        if idx >= 0:
+            self._switch_db(idx)
+
+    def _switch_db(self, idx: int):
+        if idx < 0 or idx >= len(self._db_list):
+            return
+        path, label, _ = self._db_list[idx]
+        if path == self.db.db_path:
+            return
+        self.db = OpenCodeDB(path)
+        self.cli = OpenCodeCLI(db_path=path)
+        self._load_sessions()
+        self.status_var.set(f"БД: {label} ({path})")
+
     def _sort_sessions(self, col):
         if self._session_sort_col == col:
             self._session_sort_asc = not self._session_sort_asc
@@ -216,15 +290,17 @@ class App(tk.Tk):
             self._session_sort_col = col
             self._session_sort_asc = True
 
-        # Update header arrows
-        for c in ("title", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model"):
+        # Update header arrows (column #0 = title, rest are named columns)
+        cols = ("title", "children", "status", "directory", "size", "messages", "tokens_in", "tokens_out", "reasoning", "age", "model")
+        labels = {"title": "Название", "children": "Дочер.", "status": "Сост.", "directory": "Директория", "size": "Размер",
+                  "messages": "Сообщ.", "tokens_in": "Tokens In", "tokens_out": "Tokens Out",
+                  "reasoning": "Reasoning", "age": "Возраст", "model": "Модель"}
+        for c in cols:
             arrow = ""
             if c == self._session_sort_col:
                 arrow = " ▲" if self._session_sort_asc else " ▼"
-            label = {"title": "Название", "directory": "Директория", "size": "Размер", "messages": "Сообщ.",
-                     "tokens_in": "Tokens In", "tokens_out": "Tokens Out",
-                     "reasoning": "Reasoning", "age": "Возраст", "model": "Модель"}[c]
-            self.tree.heading(c, text=label + arrow)
+            target = "#0" if c == "title" else c
+            self.tree.heading(target, text=labels[c] + arrow)
 
         self._load_sessions()
 
@@ -962,42 +1038,103 @@ class App(tk.Tk):
         self._all_sessions = sessions
         self._filter_sessions()
         self.tree.update_idletasks()
-        self.status_var.set(f"Загружено {len(sessions)} сессий")
+        db_label = Path(self.db.db_path).stem
+        self.status_var.set(f"[{db_label}] Загружено {len(sessions)} сессий")
 
     def _filter_sessions(self, *args):
         search = self.search_var.get().lower()
-        filtered = [s for s in self._all_sessions if search in s.title.lower() or search in s.id.lower()]
-        self._sessions = filtered
+        if not search:
+            self._sessions = self._all_sessions
+        else:
+            matched = [s for s in self._all_sessions if search in s.title.lower() or search in s.id.lower()]
+            # If a child matched, also include its parent
+            child_parent_ids = {s.parent_id for s in matched if s.parent_id}
+            for s in self._all_sessions:
+                if s.id in child_parent_ids and s not in matched:
+                    matched.append(s)
+            self._sessions = matched
         self._refresh_tree()
 
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
         self._session_map = {}
-        for s in self._sessions:
-            self._insert_session(s)
+        show_sub = self.subagent_var.get()
+        existing_ids = {s.id for s in self._sessions}
 
-    def _insert_session(self, s):
+        # Separate roots, children, and orphans
+        children_of: dict[str, list[SessionInfo]] = {}
+        roots = []
+        orphans = []
+        for s in self._sessions:
+            if s.parent_id:
+                if s.parent_id in existing_ids:
+                    children_of.setdefault(s.parent_id, []).append(s)
+                else:
+                    orphans.append(s)
+            else:
+                roots.append(s)
+
+        # Insert roots
+        for s in roots:
+            child_count = len(children_of.get(s.id, []))
+            iid = self._insert_session(s, child_count=child_count)
+            self._session_map[iid] = s
+            # Insert children under this root
+            if show_sub:
+                for child in children_of.get(s.id, []):
+                    child_iid = self._insert_session(child, parent_iid=iid)
+                    self._session_map[child_iid] = child
+                if child_count > 0:
+                    self.tree.item(iid, open=True)
+
+        # Insert orphans at top level with red tags
+        if show_sub and orphans:
+            sep_iid = self.tree.insert("", tk.END, text="── Orphan (родитель удалён) ──",
+                                        values=("", "", "", "", "", "", "", "", ""))
+            self.tree.item(sep_iid, tags=("orphan",))
+            self._session_map[sep_iid] = None
+            for child in orphans:
+                child_iid = self._insert_session(child, parent_iid="", orphan=True)
+                self._session_map[child_iid] = child
+
+    def _insert_session(self, s, parent_iid="", child_count=0, orphan=False):
         model = s.model.split("/")[-1] if s.model else ""
         try:
             m = json.loads(s.model)
             model = m.get("id", s.model)
         except:
             pass
-        # Shorten directory path for display: show last 2-3 components
+        # Shorten directory path
         directory = s.directory or ""
         sep = "\\"
         parts = directory.split(sep)
         if len(parts) > 3:
-            if parts[0].endswith(":"):  # Keep drive letter
+            if parts[0].endswith(":"):
                 directory = parts[0] + sep + "..." + sep + sep.join(parts[-2:])
             else:
                 directory = "..." + sep + sep.join(parts[-2:])
-        iid = self.tree.insert("", tk.END, values=(
-            s.title[:60], directory, s.size_str, s.message_count,
+        # Children column: for root show count, for subagent show "→", for orphan "⚠"
+        if orphan:
+            children_display = "⚠"
+        elif parent_iid:
+            children_display = "→"
+        else:
+            children_display = str(child_count) if child_count > 0 else ""
+        # Status column
+        status_display = "🗄" if s.is_archived else ""
+        iid = self.tree.insert(parent_iid, tk.END, text=s.title[:60], values=(
+            children_display, status_display, directory, s.size_str, s.message_count,
             f"{s.tokens_input:,}", f"{s.tokens_output:,}",
             f"{s.tokens_reasoning:,}", s.age_str, model
         ))
-        self._session_map[iid] = s
+        if orphan:
+            self.tree.item(iid, tags=("orphan_subagent",))
+        elif parent_iid and s.is_archived:
+            self.tree.item(iid, tags=("archived_subagent",))
+        elif parent_iid:
+            self.tree.item(iid, tags=("subagent",))
+        elif s.is_archived:
+            self.tree.item(iid, tags=("archived",))
         return iid
 
     # ─────────────────────────────────────────────
@@ -1141,10 +1278,61 @@ class App(tk.Tk):
         self.status_var.set(f"Удалено {count} сессий")
         self._load_sessions()
 
+    def _archive_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        if self._check_opencode():
+            return
+        active = [iid for iid in sel if self._session_map.get(iid) and not self._session_map[iid].is_archived]
+        if not active:
+            return
+        if not messagebox.askyesno("Подтверждение", f"Архивировать {len(active)} сессий?"):
+            return
+        def do():
+            done = 0
+            for iid in active:
+                s = self._session_map.get(iid)
+                if s and self.db.archive_session(s.id):
+                    done += 1
+            self.after(0, lambda: self._archive_done(done))
+        threading.Thread(target=do, daemon=True).start()
+
+    def _archive_done(self, count):
+        self.status_var.set(f"Архивировано: {count}")
+        self._need_sessions_refresh = True
+        self._load_sessions()
+
+    def _unarchive_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        if self._check_opencode():
+            return
+        archived = [iid for iid in sel if self._session_map.get(iid) and self._session_map[iid].is_archived]
+        if not archived:
+            return
+        if not messagebox.askyesno("Подтверждение", f"Разархивировать {len(archived)} сессий?"):
+            return
+        def do():
+            done = 0
+            for iid in archived:
+                s = self._session_map.get(iid)
+                if s and self.db.unarchive_session(s.id):
+                    done += 1
+            self.after(0, lambda: self._unarchive_done(done))
+        threading.Thread(target=do, daemon=True).start()
+
+    def _unarchive_done(self, count):
+        self.status_var.set(f"Разархивировано: {count}")
+        self._need_sessions_refresh = True
+        self._load_sessions()
+
     # ─────────────────────────────────────────────
     # ОЧИСТКА
     # ─────────────────────────────────────────────
     def _log(self, msg):
+
         def _do():
             self.cleanup_log.config(state=tk.NORMAL)
             ts = datetime.now().strftime("%H:%M:%S")
@@ -1235,6 +1423,19 @@ class App(tk.Tk):
             return
         session = self._session_map.get(sel[0])
         if not session:
+            return
+
+        # Block subagent sessions — they follow their parent
+        if session.parent_id:
+            parent = self.db.get_session(session.parent_id)
+            pname = parent.title[:40] if parent else session.parent_id
+            messagebox.showwarning(
+                "Дочерняя сессия",
+                f"Это дочерняя (subagent) сессия.\n"
+                f"Она привязана к родительской: «{pname}»\n\n"
+                f"Переносите родительскую сессию —\n"
+                f"дочерние переедут автоматически."
+            )
             return
 
         if self._check_opencode():
@@ -1410,6 +1611,12 @@ class App(tk.Tk):
                            font=("Consolas", 9))
             style.configure("Treeview.Heading", background=heading_bg, foreground=fg,
                            font=("Segoe UI", 9, "bold"))
+            if hasattr(self, 'tree'):
+                self.tree.tag_configure("subagent", foreground="#8b949e", font=("Consolas", 9, "italic"))
+                self.tree.tag_configure("archived", foreground="#8b949e")
+                self.tree.tag_configure("archived_subagent", foreground="#6b7280", font=("Consolas", 9, "italic"))
+                self.tree.tag_configure("orphan", foreground="#f85149")
+                self.tree.tag_configure("orphan_subagent", foreground="#f85149", font=("Consolas", 9, "italic"))
             style.configure("TButton", background=btn_bg, foreground=fg, padding=4)
             style.configure("TEntry", fieldbackground=entry_bg, foreground=fg)
             style.configure("TCombobox", fieldbackground=entry_bg, foreground=fg)
@@ -1480,6 +1687,12 @@ class App(tk.Tk):
                            selectbackground="#2563eb", selectforeground="white")
             style.configure("Treeview.Heading", background="#e5e7eb", foreground="black",
                            font=("Segoe UI", 9, "bold"))
+            if hasattr(self, 'tree'):
+                self.tree.tag_configure("subagent", foreground="#6b7280", font=("Consolas", 9, "italic"))
+                self.tree.tag_configure("orphan", foreground="#dc2626")
+                self.tree.tag_configure("orphan_subagent", foreground="#dc2626", font=("Consolas", 9, "italic"))
+                self.tree.tag_configure("archived", foreground="#9ca3af")
+                self.tree.tag_configure("archived_subagent", foreground="#9ca3af", font=("Consolas", 9, "italic"))
             style.configure("TButton", padding=4, background="#e5e7eb", foreground="black")
             style.configure("TEntry", fieldbackground="white", foreground="black")
             style.configure("TCombobox", fieldbackground="white", foreground="black")
@@ -1868,9 +2081,35 @@ class App(tk.Tk):
         self._p("Клик по заголовку — сортировка по директории.")
         self._p("")
 
-        self._h("2.10 Известные ограничения и баги", "h1")
+        self._h("2.10 Иерархическое дерево (родитель → subagent)", "h1")
+        self._p("Сессии отображаются в виде дерева:")
+        self._bullet("Корневые сессии — верхний уровень")
+        self._bullet("Дочерние (subagent) — под родителем с отступом, серым курсивом")
+        self._bullet("Колонка «Дочер.» — число subagent'ов у корневой сессии")
+        self._p("Чекбокс «Sub» в тулбаре включает/выключает показ subagent-сессий.")
+        self._p("Кнопка «Перенести в проект» отключается при выборе subagent —")
+        self._p("переносить можно только корневые сессии (дети переезжают автоматически).")
+        self._p("")
 
-        self._h("2.10.1 Две базы OpenCode", "h2")
+        self._h("2.11 Выбор базы данных (DB Selector)", "h1")
+        self._p("В тулбаре — выпадающий список всех найденных opencode*.db:")
+        self._code("  opencode (60 сес.) | opencode-dev (7 сес.) | opencode1 (51 сес.)")
+        self._p("При запуске автоматически выбирается БД с наибольшим количеством сессий.")
+        self._p("Переключение — сессии перезагружаются из выбранной БД.")
+        self._p("Статус-бар показывает активную БД: [opencode] Загружено 60 сессий")
+        self._p("")
+
+        self._h("2.12 MCP-инспектор баз opencode", "h1")
+        self._p("Для отладки создан MCP-сервер mcp-opencode-db.py.")
+        self._p("Доступен как инструмент внутри opencode-сессии:")
+        self._code("  oc_list_dbs / oc_list_sessions / oc_get_session")
+        self._code("  oc_get_children / oc_check_orphans / oc_query")
+        self._p("Подключён в глобальном opencode.jsonc. Требует перезапуска opencode после изменений.")
+        self._p("")
+
+        self._h("2.13 Известные ограничения и баги", "h1")
+
+        self._h("2.13.1 Две базы OpenCode", "h2")
         self._p("На системе могут быть ДВЕ базы данных OpenCode:")
         self._table_row(["База", "Канал", "Где используется"], header=True)
         self._table_row(["opencode.db", "latest", "Desktop-приложение (OpenCode.exe)"])
@@ -1879,34 +2118,63 @@ class App(tk.Tk):
         self._p("Если кажется что сессий мало — проверьте `opencode db path` в терминале.")
         self._p("")
 
-        self._h("2.10.2 Tkinter возвращает / вместо \\", "h2")
+        self._h("2.13.2 Tkinter возвращает / вместо \\", "h2")
         self._p("На Windows tkinter.filedialog.askdirectory() может вернуть путь")
         self._p("с forward slashes (Q:/Desktop/...) вместо backslashes (Q:\\Desktop\\...).")
         self._p("Это ломает формат колонки directory в БД → сессия не отображается.")
         self._p("Исправлено: нормализация в app.py (после диалога) и core.py (в методе).", tag="indent")
         self._p("")
 
-        self._h("2.10.3 Tauri Store не понимает BOM", "h2")
+        self._h("2.13.3 Tauri Store не понимает BOM", "h2")
         self._p("Desktop-приложение хранит состояние в Tauri Store (JSON файлы).")
         self._p("Если файл содержит UTF-8 BOM (EF BB BF) — Store падает с ошибкой парсинга.")
         self._code("  renderer.log: Error invoking remote method 'store-set':")
         self._code("  SyntaxError: Unexpected token '\\u00ef\\u00bb\\u00bf'")
-        self._p("Исправление: удалить BOM или удалить .dat файлы (пересоздадутся).", tag="indent")
+        self._p("Причина: `json.dump()` с `encoding='utf-8-sig'` добавляет BOM в начало файла.", tag="indent")
+        self._p("Исправление: открыть файл с `encoding='utf-8'` (без -sig) и пересохранить.", tag="indent")
+        self._p("Либо удалить .dat файлы — Desktop пересоздаст их при следующем запуске.", tag="indent")
         self._p("")
 
-        self._h("2.10.4 Копии БД сбивают автоопределение", "h2")
+        self._h("2.13.4 Копии БД сбивают автоопределение", "h2")
         self._p("Файлы вида «opencode - Копия (2).db» находятся через glob `opencode*.db`.")
         self._p("При равенстве сессий сортировка по имени выбирала копию вместо opencode.db.")
         self._p("Исправлено: приоритет opencode.db при равном количестве сессий.", tag="indent")
         self._p("")
 
-        self._h("2.10.5 Сессия не отображается — что проверить", "h2")
+        self._h("2.13.5 Сессия не отображается — что проверить", "h2")
         self._p("По порядку:")
         self._code("  1. opencode db path — какая БД активна?")
         self._code("  2. SELECT COUNT(*) FROM session — есть ли сессии вообще?")
-        self._code("  3. SELECT worktree, vcs FROM project WHERE id='global' — должен быть / и NULL")
-        self._code("  4. SELECT directory FROM session WHERE directory LIKE '%/%' — есть / вместо \\?")
-        self._code("  5. %APPDATA%\\ai.opencode.desktop\\logs\\*\\renderer.log — ошибки Store?")
+        self._code("  3. SELECT id, title FROM session WHERE time_archived IS NOT NULL — архивные?")
+        self._code("  4. SELECT worktree, vcs FROM project WHERE id='global' — правильный путь?")
+        self._code("  5. SELECT directory FROM session WHERE directory LIKE '%/%' — / вместо \\?")
+        self._code("  6. %APPDATA%\\ai.opencode.desktop\\logs\\*\\renderer.log — ошибки Store (BOM)?")
+        self._code("  7. %APPDATA%\\ai.opencode.desktop\\opencode.global.dat — проверить .json парсинг")
+        self._sep()
+
+        self._h("2.14 Архивация сессий", "h1")
+        self._p("Позволяет скрыть сессии из основного списка без удаления.")
+        self._p("")
+
+        self._h("2.14.1 Колонка «Сост.»", "h2")
+        self._p("Показывает статус сессии:")
+        self._bullet("🗄 — сессия в архиве (скрыта из основного списка opencode)")
+        self._bullet("пусто — активная сессия")
+        self._p("Архивные строки выделяются серым цветом.")
+        self._p("")
+
+        self._h("2.14.2 Кнопки управления", "h2")
+        self._table_row(["Кнопка", "Действие", "Когда активна"], header=True)
+        self._table_row(["Архивировать", "Устанавливает time_archived = now", "Выбраны активные сессии"])
+        self._table_row(["Разархивировать", "Сбрасывает time_archived = NULL", "Выбраны архивные сессии"])
+        self._p("")
+
+        self._h("2.14.3 Защита", "h2")
+        self._p("Обе кнопки блокируются если OpenCode запущен (та же проверка, что и для удаления/переноса).")
+        self._code("  Get-Process -Name 'OpenCode.exe','opencode'")
+        self._p("Архивация безопасна — данные сессии не теряются, только скрываются.")
+        self._p("")
+
         self._sep()
 
         # ── 3. Messages ──

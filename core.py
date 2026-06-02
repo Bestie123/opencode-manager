@@ -6,6 +6,7 @@ import sqlite3
 import os
 import json
 import shutil
+import time
 import dataclasses
 from pathlib import Path
 from datetime import datetime, timezone
@@ -29,7 +30,12 @@ class SessionInfo:
     cost: float = 0.0
     size_bytes: int = 0
     parent_id: Optional[str] = None
+    time_archived: Optional[int] = None
     is_subagent: bool = False
+
+    @property
+    def is_archived(self) -> bool:
+        return self.time_archived is not None
 
     @property
     def created_dt(self) -> datetime:
@@ -95,34 +101,9 @@ class OpenCodeDB:
         (typically opencode.db for stable installs). Falls back to CLI path
         or heuristic detection.
         """
-        base = Path.home() / ".local" / "share" / "opencode"
-        candidates: list[tuple[str, int]] = []  # (path, session_count)
-
-        # Collect all potential DBs
-        for f in base.glob("opencode*.db"):
-            if f.name.endswith(".db-shm") or f.name.endswith(".db-wal"):
-                continue
-            try:
-                conn = sqlite3.connect(str(f))
-                c = conn.cursor()
-                c.execute("SELECT COUNT(*) FROM session")
-                count = c.fetchone()[0]
-                conn.close()
-                candidates.append((str(f), count))
-            except Exception:
-                candidates.append((str(f), 0))
-
-        # Prefer DB with most sessions (user's real data)
-        if candidates:
-            candidates.sort(key=lambda x: (-x[1], x[0]))
-            # Prefer opencode.db over copies when session count is tied
-            best = candidates[0]
-            for path, count in candidates:
-                if count < best[1]:
-                    break
-                if os.path.basename(path).lower() == "opencode.db":
-                    best = (path, count)
-            return best[0]
+        dbs = OpenCodeDB.list_databases()
+        if dbs:
+            return dbs[0][0]
 
         # Fallback: try 'opencode db path' via CLI
         try:
@@ -139,6 +120,32 @@ class OpenCodeDB:
             pass
 
         return None
+
+    @staticmethod
+    def list_databases() -> list[tuple[str, str, int]]:
+        """Scan all opencode DBs and return (path, label, session_count), sorted by count desc."""
+        base = Path.home() / ".local" / "share" / "opencode"
+        candidates: list[tuple[str, str, int]] = []
+
+        for f in base.glob("opencode*.db"):
+            name = f.name
+            if name.endswith(".db-shm") or name.endswith(".db-wal"):
+                continue
+            if name.endswith(".backup-"):
+                continue
+            try:
+                conn = sqlite3.connect(str(f))
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM session")
+                count = c.fetchone()[0]
+                conn.close()
+                label = name.replace(".db", "")
+                candidates.append((str(f), label, count))
+            except Exception:
+                continue
+
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return candidates
 
     def connect(self, readonly: bool = True) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, timeout=10)
@@ -169,7 +176,8 @@ class OpenCodeDB:
         # Step 3: Get session metadata
         sess_query = """
             SELECT id, title, directory, model, time_created, time_updated,
-                   parent_id, tokens_input, tokens_output, tokens_reasoning, cost
+                   parent_id, tokens_input, tokens_output, tokens_reasoning, cost,
+                   time_archived
             FROM session
         """
 
@@ -207,6 +215,7 @@ class OpenCodeDB:
                 tokens_output=r[8] or 0,
                 tokens_reasoning=r[9] or 0,
                 cost=r[10] or 0.0,
+                time_archived=r[11],
                 message_count=msg_counts.get(sid, 0),
                 size_bytes=sizes.get(sid, 0),
                 is_subagent=r[6] is not None,
@@ -219,6 +228,8 @@ class OpenCodeDB:
             sessions.sort(key=lambda s: s.message_count, reverse=not ascending)
         elif sort_by == "model":
             sessions.sort(key=lambda s: s.model.lower(), reverse=not ascending)
+        elif sort_by == "status":
+            sessions.sort(key=lambda s: (0 if s.is_archived else 1, s.time_created or 0), reverse=not ascending)
 
         if limit:
             sessions = sessions[:limit]
@@ -237,7 +248,8 @@ class OpenCodeDB:
 
         c.execute("""
             SELECT id, title, directory, model, time_created, time_updated,
-                   parent_id, tokens_input, tokens_output, tokens_reasoning, cost
+                   parent_id, tokens_input, tokens_output, tokens_reasoning, cost,
+                   time_archived
             FROM session WHERE id = ?
         """, (session_id,))
         r = c.fetchone()
@@ -258,6 +270,7 @@ class OpenCodeDB:
             tokens_output=r[8] or 0,
             tokens_reasoning=r[9] or 0,
             cost=r[10] or 0.0,
+            time_archived=r[11],
             message_count=msg_count,
             size_bytes=size_bytes,
             is_subagent=r[6] is not None,
@@ -449,6 +462,35 @@ class OpenCodeDB:
                 shutil.rmtree(d)
                 count += 1
         return count
+
+    def archive_session(self, session_id: str) -> bool:
+        conn = self.connect(readonly=False)
+        c = conn.cursor()
+        try:
+            now = int(time.time() * 1000)
+            c.execute("UPDATE session SET time_archived = ? WHERE id = ?", (now, session_id))
+            conn.commit()
+            return c.rowcount > 0
+        except Exception as e:
+            conn.rollback()
+            print(f"Error archiving session {session_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def unarchive_session(self, session_id: str) -> bool:
+        conn = self.connect(readonly=False)
+        c = conn.cursor()
+        try:
+            c.execute("UPDATE session SET time_archived = NULL WHERE id = ?", (session_id,))
+            conn.commit()
+            return c.rowcount > 0
+        except Exception as e:
+            conn.rollback()
+            print(f"Error unarchiving session {session_id}: {e}")
+            return False
+        finally:
+            conn.close()
 
     def clean_orphan_diffs(self) -> int:
         diff_dir = self._opencode_base / "storage" / "session_diff"
@@ -786,8 +828,8 @@ class OpenCodeCLI:
     since 'opencode export/import/session list' commands do not exist.
     """
 
-    def __init__(self, opencode_cmd: str = "opencode"):
-        self.db = OpenCodeDB()
+    def __init__(self, opencode_cmd: str = "opencode", db_path: Optional[str] = None):
+        self.db = OpenCodeDB(db_path)
 
     def export_session(self, session_id: str, output_path: str) -> bool:
         """Export session to JSON by reading directly from SQLite."""

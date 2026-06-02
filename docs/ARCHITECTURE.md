@@ -2,6 +2,9 @@
 
 > **Для встраивания в сам opencode:** см. `ARCHITECTURE-PR.md` — без привязки к этому проекту, готово к PR.
 
+> Doc-ID: ARCH-v2 | Последнее обновление: 2026-06-02
+> Связанные: [DB-SELECTOR-1], [H-TREE-1], [S-MOVE-2], [MCP-OCDB-1]
+>
 > Создано: 2026-06-01
 > Контекст: После инцидента с пропажей сессий в OpenCode Desktop
 
@@ -532,4 +535,32 @@ WHERE directory LIKE '%/%'
 SELECT COUNT(*) FROM session
 WHERE parent_id IS NULL
   AND time_updated > (strftime('%s','now') - 30*86400) * 1000;
+```
+
+---
+
+## 11. Новые функции Session Manager
+
+См. отдельные документы:
+
+| Doc-ID | Функция | Описание |
+|--------|---------|----------|
+| [DB-SELECTOR-1](features/db-selector.md) | Выбор БД | Автоопределение, селектор в тулбаре, OpenCodeDB.list_databases() |
+| [H-TREE-1](features/hierarchical-tree.md) | Иерархическое дерево | Treeview #0, parent-child, subagent styling, фильтр Sub |
+| [S-MOVE-2](features/session-move.md) | Перенос сессий | project_id, path, каскад на subagent, блокировка |
+| [MCP-OCDB-1](features/mcp-opencode-db.md) | MCP-инспектор БД | 6 инструментов для диагностики, read-only SQL |
+
+### Ключевые изменения в core.py
+
+- `_detect_db_path()` — сканирует все `opencode*.db`, выбирает с макс. сессиями
+- `list_databases()` — статический метод, возвращает `[(path, label, count)]`
+- `_resolve_project_id()` — определяет `project_id` по git-корню
+- `update_session_directory()` — обновляет `directory`, `path`, `project_id` + каскад на детей
+
+### Ключевые изменения в app.py
+
+- `show="tree headings"` — иерархический Treeview с column #0
+- `_refresh_tree()` — parent → children map, иерархическая вставка
+- Чекбокс «Sub», disabled-кнопка для subagent
+- DB-селектор в тулбаре
 ```
