@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenCode Session Manager — Документация</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#f8fafc; color:#1e293b; padding:30px; }
+.container { max-width:960px; margin:0 auto; }
+.header { background:linear-gradient(135deg,#1e40af,#2563eb); color:#fff; padding:30px 40px; border-radius:12px; margin-bottom:24px; }
+.header h1 { font-size:1.8em; margin-bottom:4px; }
+.header p { font-size:.95em; opacity:.9; }
+.section { background:#fff; border-radius:12px; padding:24px 30px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+.section h2 { font-size:1.2em; color:#1e40af; margin-bottom:12px; border-bottom:1px solid #e2e8f0; padding-bottom:8px; }
+.card-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; }
+.card { display:block; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px 18px; text-decoration:none; color:inherit; transition:all .15s; }
+.card:hover { border-color:#2563eb; box-shadow:0 2px 8px rgba(37,99,235,.12); transform:translateY(-1px); }
+.card h3 { font-size:1em; color:#0f172a; margin-bottom:4px; }
+.card p { font-size:.85em; color:#64748b; }
+.tag { display:inline-block; background:#eff6ff; color:#2563eb; font-size:.7em; padding:2px 8px; border-radius:4px; font-weight:600; margin-bottom:6px; }
+@media (prefers-color-scheme:dark) {
+body { background:#0f172a; color:#e2e8f0; }
+.section { background:#1e293b; }
+.section h2 { color:#60a5fa; border-bottom-color:#334155; }
+.card { background:#1e293b; border-color:#334155; }
+.card h3 { color:#f1f5f9; }
+.card p { color:#94a3b8; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>OpenCode Session Manager</h1>
+<p>Полная документация: руководства, справочники, архитектура, FAQ</p>
+</div>
+
+<div class="section">
+<h2>Начало работы</h2>
+<div class="card-grid">
+<a class="card" href="CHANGELOG.md">
+<span class="tag">CHANGELOG</span>
+<h3>История изменений</h3>
+<p>Что нового в каждой версии Session Manager</p>
+</a>
+<a class="card" href="features/db-selector.md">
+<span class="tag">FEAT-DB-1</span>
+<h3>Выбор базы данных</h3>
+<p>Автоопределение БД, переключение, особенности Windows</p>
+</a>
+<a class="card" href="features/hierarchical-tree.md">
+<span class="tag">FEAT-TREE-1</span>
+<h3>Иерархическое дерево</h3>
+<p>Отображение parent→child, subagent, orphan-секция</p>
+</a>
+</div>
+</div>
+
+<div class="section">
+<h2>Управление сессиями</h2>
+<div class="card-grid">
+<a class="card" href="features/archive.md">
+<span class="tag">FEAT-ARCH-1</span>
+<h3>Архивация сессий</h3>
+<p>Скрытие сессий без удаления, колонка «Сост.», кнопки</p>
+</a>
+<a class="card" href="features/session-move.md">
+<span class="tag">FEAT-MOVE-2</span>
+<h3>Перенос сессий</h3>
+<p>Смена проекта, каскад на subagent, блокировка OpenCode</p>
+</a>
+<a class="card" href="guides/migration.md">
+<span class="tag">GUIDE-MIGRATE-1</span>
+<h3>Миграция между БД</h3>
+<p>Перенос сессий между opencode.db и opencode-dev.db</p>
+</a>
+</div>
+</div>
+
+<div class="section">
+<h2>Диагностика и MCP</h2>
+<div class="card-grid">
+<a class="card" href="features/mcp-opencode-db.md">
+<span class="tag">MCP-OCDB-1</span>
+<h3>MCP-инспектор БД</h3>
+<p>6 инструментов для диагностики изнутри opencode-сессии</p>
+</a>
+<a class="card" href="guides/troubleshooting.md">
+<span class="tag">GUIDE-TROUBLE-1</span>
+<h3>Диагностика проблем</h3>
+<p>20+ сценариев: сессия не видна, Desktop не стартует, MCP</p>
+</a>
+<a class="card" href="reference/sql-queries.md">
+<span class="tag">REF-SQL-1</span>
+<h3>SQL-запросы</h3>
+<p>30+ запросов: архив, orphan, проекты, статистика</p>
+</a>
+</div>
+</div>
+
+<div class="section">
+<h2>Архитектура и справочники</h2>
+<div class="card-grid">
+<a class="card" href="ARCHITECTURE.md">
+<span class="tag">ARCH-v2</span>
+<h3>Архитектура OpenCode</h3>
+<p>Две БД, Desktop vs CLI, Tauri, сессии, инциденты</p>
+</a>
+<a class="card" href="reference/session-data-model.md">
+<span class="tag">REF-DATA-1</span>
+<h3>Модель данных</h3>
+<p>Полная схема SQLite: таблицы, поля, связи, ЖЦ сессии</p>
+</a>
+<a class="card" href="rules/documentation-standards.md">
+<span class="tag">DOC-STANDARDS-1</span>
+<h3>Стандарты документирования</h3>
+<p>Doc-ID система, Quality Gate, перекрёстные ссылки</p>
+</a>
+</div>
+</div>
+
+<div class="section" style="text-align:center; color:#64748b; font-size:.85em;">
+<p>OpenCode Session Manager &mdash; GUI-инструмент для управления базами OpenCode</p>
+<p style="margin-top:4px;">Лицензия MIT &middot; <a href="https://github.com/Bestie123/opencode-manager" style="color:#2563eb;">GitHub</a></p>
+</div>
+</div>
+</body>
+</html>

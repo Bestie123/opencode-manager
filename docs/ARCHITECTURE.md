@@ -549,6 +549,10 @@ WHERE parent_id IS NULL
 | [H-TREE-1](features/hierarchical-tree.md) | Иерархическое дерево | Treeview #0, parent-child, subagent styling, фильтр Sub |
 | [S-MOVE-2](features/session-move.md) | Перенос сессий | project_id, path, каскад на subagent, блокировка |
 | [MCP-OCDB-1](features/mcp-opencode-db.md) | MCP-инспектор БД | 6 инструментов для диагностики, read-only SQL |
+| [ARCHIVE-1](features/archive.md) | Архивация сессий | Колонка «Сост.», кнопки архивировать/разархивировать, стилизация |
+| [GUIDE-TROUBLE-1](guides/troubleshooting.md) | Диагностика | 20+ сценариев, SQL-запросы, проверка БД, логов, state-файлов |
+| [REF-SQL-1](reference/sql-queries.md) | SQL-запросы | 30+ запросов для диагностики, миграции, анализа сессий |
+| [REF-DATA-1](reference/session-data-model.md) | Модель данных | Схема таблиц, связи, жизненный цикл, форматы полей |
 
 ### Ключевые изменения в core.py
 
@@ -556,11 +560,18 @@ WHERE parent_id IS NULL
 - `list_databases()` — статический метод, возвращает `[(path, label, count)]`
 - `_resolve_project_id()` — определяет `project_id` по git-корню
 - `update_session_directory()` — обновляет `directory`, `path`, `project_id` + каскад на детей
+- `archive_session()` / `unarchive_session()` — устанавливает/снимает `time_archived`
+- `get_archived_sessions()` — возвращает список архивных сессий
 
 ### Ключевые изменения в app.py
 
 - `show="tree headings"` — иерархический Treeview с column #0
-- `_refresh_tree()` — parent → children map, иерархическая вставка
-- Чекбокс «Sub», disabled-кнопка для subagent
-- DB-селектор в тулбаре
+- `_refresh_tree()` — parent → children map, иерархическая вставка (родители → subagent → orphans)
+- Чекбокс «Sub» для скрытия/показа subagent-сессий; disabled-кнопки для subagent
+- DB-селектор в тулбаре (ttk.Combobox)
+- Колонка «Сост.» (`🗄` / пусто) с серой стилизацией архивных строк
+- Кнопки «Архивировать» / «Разархивировать» с авто-переключением по выделению
+- Orphan-секция: orphan-сессии (parent_id не NULL, родитель не найден) красным цветом с `⚠`
+- `_check_opencode()` — защита destructive-операций от запущенного OpenCode
+- Полная справка (вкладка 4): 12 разделов, FAQ, SQL-справочник, глоссарий, troubleshooting
 ```
