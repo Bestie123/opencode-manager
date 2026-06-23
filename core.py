@@ -83,6 +83,94 @@ class DBStats:
     snapshot_projects: int = 0
 
 
+class DBHealthIssue:
+    """Represents a single database health issue."""
+
+    def __init__(self, level: str, category: str, message: str, fix: str = ""):
+        self.level = level  # "error", "warning", "info"
+        self.category = category  # "malformed", "wal_conflict", "schema", "encoding", "orphan"
+        self.message = message
+        self.fix = fix
+
+    def to_dict(self) -> dict:
+        d = {"level": self.level, "category": self.category, "message": self.message}
+        if self.fix:
+            d["fix"] = self.fix
+        return d
+
+    def __str__(self):
+        prefix = {"error": "ERROR", "warning": "WARN", "info": "INFO"}.get(self.level, "?")
+        s = f"[{prefix}] {self.category}: {self.message}"
+        if self.fix:
+            s += f"\n  Fix: {self.fix}"
+        return s
+
+
+class DBHealthReport:
+    """Full health report for a database file."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.db_name = os.path.basename(db_path)
+        self.file_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+        self.issues: list[DBHealthIssue] = []
+        self.schema_version = 0
+        self.session_count = 0
+        self.message_count = 0
+        self.part_count = 0
+        self.openable = False
+        self.wal_file_exists = False
+        self.shm_file_exists = False
+        self.wal_size = 0
+
+    @property
+    def has_errors(self) -> bool:
+        return any(i.level == "error" for i in self.issues)
+
+    @property
+    def has_warnings(self) -> bool:
+        return any(i.level == "warning" for i in self.issues)
+
+    def to_dict(self) -> dict:
+        return {
+            "db_path": self.db_path,
+            "db_name": self.db_name,
+            "file_size_mb": round(self.file_size / (1024 * 1024), 1),
+            "openable": self.openable,
+            "schema_version": self.schema_version,
+            "session_count": self.session_count,
+            "message_count": self.message_count,
+            "part_count": self.part_count,
+            "wal_file_exists": self.wal_file_exists,
+            "shm_file_exists": self.shm_file_exists,
+            "wal_size_mb": round(self.wal_size / (1024 * 1024), 1) if self.wal_size else 0,
+            "issues": [i.to_dict() for i in self.issues],
+            "issue_count": len(self.issues),
+            "error_count": sum(1 for i in self.issues if i.level == "error"),
+            "warning_count": sum(1 for i in self.issues if i.level == "warning"),
+        }
+
+    def summary(self) -> str:
+        lines = [f"=== Health Report: {self.db_name} ==="]
+        lines.append(f"  Path: {self.db_path}")
+        lines.append(f"  Size: {round(self.file_size / (1024*1024), 1)} MB")
+        lines.append(f"  Openable: {self.openable}")
+        if self.openable:
+            lines.append(f"  Schema version: {self.schema_version}")
+            lines.append(f"  Sessions: {self.session_count}")
+            lines.append(f"  Messages: {self.message_count}")
+            lines.append(f"  Parts: {self.part_count}")
+        lines.append(f"  WAL file: {'yes' if self.wal_file_exists else 'no'}"
+                      + (f" ({round(self.wal_size / (1024*1024), 1)} MB)" if self.wal_size else ""))
+        lines.append(f"  SHM file: {'yes' if self.shm_file_exists else 'no'}")
+        lines.append(f"  Issues: {len(self.issues)} "
+                      f"({sum(1 for i in self.issues if i.level == 'error')} errors, "
+                      f"{sum(1 for i in self.issues if i.level == 'warning')} warnings)")
+        for issue in self.issues:
+            lines.append(f"  {issue}")
+        return "\n".join(lines)
+
+
 class OpenCodeDB:
     """Interface to OpenCode SQLite database."""
 
@@ -92,6 +180,219 @@ class OpenCodeDB:
             db_path = detected or os.path.expanduser(r"~\.local\share\opencode\opencode.db")
         self.db_path = db_path
         self._opencode_base = Path(db_path).parent
+
+    @staticmethod
+    def check_db_health(db_path: str) -> DBHealthReport:
+        """Comprehensive health check for a database file.
+
+        Detects: malformed databases, WAL/SHM conflicts, schema mismatches,
+        encoding issues, orphaned data, and missing tables.
+        """
+        report = DBHealthReport(db_path)
+
+        if not os.path.exists(db_path):
+            report.issues.append(DBHealthIssue(
+                "error", "missing", f"Database file not found: {db_path}",
+                "Restore from backup or create a new database."
+            ))
+            return report
+
+        # Check WAL/SHM files
+        wal_path = db_path + "-wal"
+        shm_path = db_path + "-shm"
+        report.wal_file_exists = os.path.exists(wal_path)
+        report.shm_file_exists = os.path.exists(shm_path)
+        if report.wal_file_exists:
+            report.wal_size = os.path.getsize(wal_path)
+
+        # Try to open the database
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            c = conn.cursor()
+            report.openable = True
+
+            # Integrity check
+            c.execute("PRAGMA integrity_check")
+            result = c.fetchone()
+            if result and result[0] != "ok":
+                report.issues.append(DBHealthIssue(
+                    "error", "malformed",
+                    f"Integrity check failed: {result[0]}",
+                    "The database is corrupted. Restore from backup or use .recover to salvage data."
+                ))
+
+            # Schema version
+            c.execute("PRAGMA schema_version")
+            report.schema_version = c.fetchone()[0]
+
+            # Check for missing expected tables
+            c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {row[0] for row in c.fetchall()}
+            expected_tables = {"session", "message", "part", "todo", "project", "migration"}
+            missing = expected_tables - tables
+            if missing:
+                report.issues.append(DBHealthIssue(
+                    "error", "schema",
+                    f"Missing critical tables: {missing}",
+                    "Database schema is incomplete. May be from an older opencode version."
+                ))
+
+            # Count data
+            try:
+                c.execute("SELECT COUNT(*) FROM session")
+                report.session_count = c.fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                c.execute("SELECT COUNT(*) FROM message")
+                report.message_count = c.fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                c.execute("SELECT COUNT(*) FROM part")
+                report.part_count = c.fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
+
+            # Check for credential table (newer schema)
+            if "credential" not in tables:
+                report.issues.append(DBHealthIssue(
+                    "info", "schema",
+                    "Missing 'credential' table (older schema, pre-v47)",
+                    "Will be created on next opencode startup via migration."
+                ))
+
+            # Check project_directory.strategy column
+            if "project_directory" in tables:
+                try:
+                    c.execute("PRAGMA table_info(project_directory)")
+                    cols = {row[1] for row in c.fetchall()}
+                    if "strategy" not in cols:
+                        report.issues.append(DBHealthIssue(
+                            "info", "schema",
+                            "Missing 'project_directory.strategy' column (older schema)",
+                            "Will be added on next opencode startup via migration."
+                        ))
+                except Exception:
+                    pass
+
+            # Check journal mode
+            c.execute("PRAGMA journal_mode")
+            jm = c.fetchone()[0]
+            if jm != "wal":
+                report.issues.append(DBHealthIssue(
+                    "warning", "wal_conflict",
+                    f"Journal mode is '{jm}', expected 'wal'",
+                    "This may cause issues with opencode. Run: PRAGMA journal_mode=WAL"
+                ))
+
+            # Check for orphaned diffs
+            diff_dir = Path(db_path).parent / "storage" / "session_diff"
+            if diff_dir.exists():
+                session_ids = set()
+                try:
+                    c.execute("SELECT id FROM session")
+                    session_ids = {row[0] for row in c.fetchall()}
+                except Exception:
+                    pass
+                orphaned = 0
+                for f in diff_dir.glob("*.json"):
+                    if f.stem not in session_ids:
+                        orphaned += 1
+                if orphaned > 0:
+                    report.issues.append(DBHealthIssue(
+                        "warning", "orphan",
+                        f"{orphaned} orphaned session_diff files (not linked to any session)",
+                        "Clean with: oc_clean_orphan_diffs or delete files manually."
+                    ))
+
+            # Check lost_and_found table size
+            if "lost_and_found" in tables:
+                try:
+                    c.execute("SELECT COUNT(*) FROM lost_and_found")
+                    lf_count = c.fetchone()[0]
+                    if lf_count > 1000:
+                        report.issues.append(DBHealthIssue(
+                            "warning", "orphan",
+                            f"lost_and_found table has {lf_count} rows (orphaned data)",
+                            "Consider cleaning up. This data is not linked to any session."
+                        ))
+                except Exception:
+                    pass
+
+        except sqlite3.DatabaseError as e:
+            err_msg = str(e).lower()
+            if "malformed" in err_msg:
+                report.issues.append(DBHealthIssue(
+                    "error", "malformed",
+                    f"Database is corrupted: {e}",
+                    "CAUSE: WAL/SHM files from a different database schema, or physical corruption.\n"
+                    "FIX:\n"
+                    "  1. Stop opencode\n"
+                    "  2. Delete the -wal and -shm files alongside this .db\n"
+                    "  3. If still broken, restore from backup\n"
+                    "  4. To recover data: use sqlite3 .recover command"
+                ))
+                # Check if WAL/SHM exist - likely the cause
+                if report.wal_file_exists or report.shm_file_exists:
+                    report.issues.append(DBHealthIssue(
+                        "error", "wal_conflict",
+                        f"WAL/SHM files exist (WAL={report.wal_size} bytes). "
+                        "These may be from a different database schema and cause the malformed error.",
+                        "Delete -wal and -shm files, then try again:\n"
+                        f"  Remove-Item '{db_path}-wal'\n"
+                        f"  Remove-Item '{db_path}-shm'"
+                    ))
+            elif "locked" in err_msg or "busy" in err_msg:
+                report.issues.append(DBHealthIssue(
+                    "error", "locked",
+                    f"Database is locked: {e}",
+                    "Another process (opencode?) may be using this database. Close it first."
+                ))
+            else:
+                report.issues.append(DBHealthIssue(
+                    "error", "unknown", f"Database error: {e}",
+                    "Try restoring from backup."
+                ))
+        except Exception as e:
+            report.issues.append(DBHealthIssue(
+                "error", "unknown", f"Unexpected error: {e}",
+                "Try restoring from backup."
+            ))
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return report
+
+    @staticmethod
+    def repair_wal_conflict(db_path: str, dry_run: bool = True) -> dict:
+        """Attempt to repair WAL/SMH conflict by removing WAL/SHM files.
+
+        Returns a dict with actions taken or planned.
+        """
+        wal_path = db_path + "-wal"
+        shm_path = db_path + "-shm"
+        actions = []
+
+        for path, name in [(wal_path, "WAL"), (shm_path, "SHM")]:
+            if os.path.exists(path):
+                size = os.path.getsize(path)
+                if dry_run:
+                    actions.append(f"Would delete: {name} file ({size} bytes)")
+                else:
+                    os.remove(path)
+                    actions.append(f"Deleted: {name} file ({size} bytes)")
+            else:
+                actions.append(f"No {name} file found")
+
+        return {"db": db_path, "dry_run": dry_run, "actions": actions}
 
     @staticmethod
     def _detect_db_path() -> Optional[str]:
@@ -353,20 +654,22 @@ class OpenCodeDB:
         """Resolve project_id from directory path, matching against project table."""
         try:
             import subprocess
+            # Normalize to forward slashes for git
+            dir_fwd = directory.replace('\\', '/')
             result = subprocess.run(
-                ["git", "-C", directory, "rev-parse", "--show-toplevel"],
+                ["git", "-C", dir_fwd, "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode != 0:
                 return "global"
-            git_root = result.stdout.strip().replace("/", "\\")
+            git_root = result.stdout.strip().replace('\\', '/')
 
             conn = self.connect(readonly=True)
             c = conn.cursor()
             c.execute("SELECT id, worktree FROM project WHERE id != 'global'")
             for row in c.fetchall():
-                pid, wt = row[0], (row[1] or "").replace("/", "\\").rstrip("\\")
-                if wt and (git_root == wt or git_root.startswith(wt + "\\")):
+                pid, wt = row[0], (row[1] or "").replace('\\', '/').rstrip('/')
+                if wt and (git_root == wt or git_root.startswith(wt + "/")):
                     conn.close()
                     return pid
             conn.close()
@@ -378,17 +681,15 @@ class OpenCodeDB:
         conn = self.connect(readonly=False)
         c = conn.cursor()
         try:
-            # Normalize directory separators (tkinter may return forward slashes on Windows)
-            if os.name == 'nt':
-                new_directory = new_directory.replace('/', '\\')
+            # Normalize to forward slashes for consistency
+            new_directory = new_directory.replace('\\', '/')
             new_project_id = self._resolve_project_id(new_directory)
-            new_path = new_directory.replace("\\", "/")
 
             c.execute("""
                 UPDATE session
                 SET directory = ?, path = ?, project_id = ?
                 WHERE id = ?
-            """, (new_directory, new_path, new_project_id, session_id))
+            """, (new_directory, new_directory, new_project_id, session_id))
             updated = c.rowcount
 
             # Also update all child (subagent) sessions
@@ -396,7 +697,7 @@ class OpenCodeDB:
                 UPDATE session
                 SET directory = ?, path = ?, project_id = ?
                 WHERE parent_id = ?
-            """, (new_directory, new_path, new_project_id, session_id))
+            """, (new_directory, new_directory, new_project_id, session_id))
 
             conn.commit()
             return updated > 0
