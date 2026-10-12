@@ -1,6 +1,6 @@
 # Диагностика и решение проблем
 
-> Doc-ID: GUIDE-TROUBLE-1 | Дата: 2026-06-02 | Связанные: [REF-SQL-1], [REF-DATA-1], [BUGS]
+> Doc-ID: GUIDE-TROUBLE-1 | Дата: 2026-06-22 | Связанные: [REF-SQL-1], [REF-DATA-1], [BUGS], [GUIDE-CORRUPT-1], [GUIDE-CORRUPT-2], [MCP-DB-001]
 
 ## 1. Сессия не отображается в opencode
 
@@ -65,14 +65,18 @@ python -c "import json; f=open(r'%APPDATA%\ai.opencode.desktop\opencode.global.d
 
 ### 2.3 Порча БД (SQLITE_CORRUPT)
 **Симптом:** Ошибка "database disk image is malformed".
+**Причина:** Параллельная запись в SQLite (opencode CLI + Desktop + бекап).
 **Решение:**
 ```bash
-# Создать дамп и восстановить
-sqlite3 opencode.db ".dump" > dump.sql
-sqlite3 opencode_new.db < dump.sql
-# Если дамп тоже падает — последний шанс:
-sqlite3 opencode.db "PRAGMA integrity_check;"
+# Быстрое восстановление (если .recover работает)
+sqlite3 opencode.db ".recover" > dump.sql
+# Конвертация UTF-16 → UTF-8 (StreamReader, НЕ ReadAllText!)
+# Импорт через cmd.exe (PowerShell < не работает)
+cmd.exe /c "sqlite3.exe new.db < dump-utf8.sql"
 ```
+**Два типа повреждения:**
+1. **B-tree leaf pages** — `.recover` частичный (139/279), `sessions > 0`. См. [GUIDE-CORRUPT-1]
+2. **sqlite_master / header** — `.recover` полный (148/148), `sessions = -1`. См. [GUIDE-CORRUPT-2] (приложение D)
 
 ## 3. Проблемы с менеджером
 
@@ -171,3 +175,120 @@ VACUUM;
 ### 7.3 Desktop пишет "Session not found"
 **Причина:** Сессия была в opencode.db, но Desktop использует opencode-dev.db.
 **Решение:** Скопируйте сессии между БД (см. migration.md).
+
+## 8. Ошибки JSON.parse при загрузке сессий/сообщений
+
+### 8.1 "Не удалось загрузить сессии" — пустые сессии
+**Симптом:** Toast "Не удалось загрузить сессии для {project}". В консоли: "Failed to load sessions".
+**Причина:** Сессии без единого сообщения. opencode не может их обработать.
+**Диагностика:**
+```sql
+SELECT COUNT(*) FROM session s LEFT JOIN message m ON m.session_id = s.id WHERE m.id IS NULL;
+```
+**Решение:** `db_fix()` в MCP `opencode-db`, или вручную:
+```sql
+DELETE FROM session WHERE id IN (
+  SELECT s.id FROM session s LEFT JOIN message m ON m.session_id = s.id WHERE m.id IS NULL
+);
+```
+
+### 8.2 500 при загрузке — пустые sandboxes в project
+**Симптом:** "Unexpected server error" при открытии любой сессии. В логах: `SyntaxError: Unexpected end of JSON input`.
+**Цепочка:** `SELECT ... FROM project WHERE id = ?` → Drizzle `mode:"json"` → `JSON.parse("")` → SyntaxError.
+**Причина:** У проекта `global` поле `sandboxes = ""` вместо `"[]"`.
+**Диагностика:**
+```sql
+SELECT id, sandboxes FROM project WHERE sandboxes = '' OR sandboxes IS NULL;
+```
+**Решение:** `db_fix()` в MCP `opencode-db`, или вручную:
+```sql
+UPDATE project SET sandboxes = '[]' WHERE sandboxes = '' OR sandboxes IS NULL;
+```
+
+### 8.3 500 при fetchMessages — пустые message.data / part.data
+**Симптом:** "Unexpected server error" при загрузке сообщений сессии. Ошибка в `fetchMessages`.
+**Цепочка:** `SELECT ... FROM message WHERE session_id = ?` → Drizzle `mode:"json"` → `JSON.parse("")` → SyntaxError.
+**Причина:** Сообщения с пустым `data` (вероятно, от прерванной записи).
+**Диагностика:**
+```sql
+SELECT COUNT(*) FROM message WHERE data = '' OR data IS NULL OR json_valid(data) = 0;
+SELECT COUNT(*) FROM part WHERE data = '' OR data IS NULL OR json_valid(data) = 0;
+```
+**Решение:** `db_fix()` в MCP `opencode-db`, или вручную:
+```sql
+UPDATE message SET data = '{"role":"assistant"}' WHERE data = '' OR data IS NULL;
+DELETE FROM part WHERE data = '' OR data IS NULL OR json_valid(data) = 0;
+```
+
+### 8.4 Битая кириллица (mojibake) в заголовках и тексте
+
+**Симптом (тип 1 — Latin1):** `Ð—Ð°Ð´Ð°ÑÐ¸ Ð¸Ð· Ð´Ð¾ÐºÑÐ¼ÐµÐ½ÑÐ°ÑÐ¸Ð¸`
+**Симптом (тип 2 — CP866):** `╨Ч╨░╨┤╨░╤З╨╕ ╨╕╨╖ ╨┤╨╛╨║╤Г╨╝╨╡╨╜╤В╨░╤Ж╨╕╨╕`
+
+**Причина:** UTF-8 байты русского текста были прочитаны как другая однобайтовая кодировка:
+- **Latin1-тип:** UTF-8 → Latin1 (Windows-1252) → сохранено как Unicode
+- **CP866-тип:** UTF-8 → CP866 (DOS Cyrillic) → сохранено как Unicode
+
+**Фикс Latin1-типа (TypeScript/Bun):**
+```typescript
+const fixed = Buffer.from(mojibakeText, "latin1").toString("utf-8")
+```
+**Фикс Latin1-типа (Python):**
+```python
+fixed = mojibake_text.encode("latin1").decode("utf-8")
+```
+
+**Фикс CP866-типа:** Используйте MCP-инструмент `oc_fix_mojibake` (работает через полную CP866 lookup-таблицу). Подробнее: [FIX-ENCODING-1] (docs/features/fix-encoding.md), [REF-ENCODING-1] (docs/reference/encoding.md).
+
+**Детекция в MCP:**
+```json
+// Сканирование всех session.title на mojibake
+oc_detect_mojibake({ "db": "opencode.db" })
+
+// Предпросмотр исправления
+oc_fix_mojibake({ "db": "opencode.db", "dry_run": true })
+
+// Реальное исправление (создаёт backup)
+oc_fix_mojibake({ "db": "opencode.db", "confirm": true })
+```
+
+**Визуальные признаки:**
+| Тип | Символы |
+|-----|---------|
+| Latin1 | `Ð Ñ Ò Ó Ô Õ Ö × Ø Ù Ú Û Ü Ý Þ ß` |
+| CP866 | `╨ ╤ ╥ ╗ ║ ╔ ╚ ╝ ═ ╬ ╩ ╦ ╠ ╣` |
+
+### 8.5 Осиротевшие события (events без event_sequence)
+**Симптом:** Медленная загрузка, раздутая БД (до 40K+ лишних записей).
+**Причина:** События event-sourcing остаются после удаления сессии/сообщения, если каскадный DELETE не сработал.
+**Диагностика:**
+```sql
+SELECT COUNT(*) FROM event e LEFT JOIN event_sequence es ON es.aggregate_id = e.aggregate_id WHERE es.aggregate_id IS NULL;
+```
+**Решение:** `db_fix()` в MCP `opencode-db`.
+
+## 9. Профилактика
+
+### 9.1 Автоматическая проверка
+Используйте MCP `opencode-db.db_health()` — одна команда проверяет все известные проблемы:
+- Пустые сессии
+- Битый JSON в message/part
+- Пустые sandboxes
+- Битую кодировку
+- Осиротевшие события
+- Lost & found
+
+### 9.2 Регулярные проверки
+```bash
+# Через opencode MCP (в сессии):
+db_health()                    # быстрая проверка
+db_find_broken()               # полное сканирование
+db_fix(dry_run=true)           # что будет исправлено
+db_fix(fix_encoding=true)      # полная починка + encoding
+```
+
+### 9.3 После переноса данных между БД
+Всегда запускайте после `INSERT ... SELECT` или ручного копирования:
+```bash
+db_fix(fix_encoding=true)      # чинит и JSON, и кодировку
+```

@@ -858,6 +858,14 @@ class App(tk.Tk):
         ttk.Button(row3, text="Vacuum БД",
                   command=self._vacuum_db).pack(side=tk.LEFT, padx=5)
 
+        row_enc = ttk.Frame(top)
+        row_enc.pack(fill=tk.X, pady=2)
+        ttk.Button(row_enc, text="Поиск mojibake (CP866)",
+                  command=self._detect_mojibake).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_enc, text="Исправить кодировку",
+                  command=self._fix_mojibake_gui,
+                  style="Danger.TButton").pack(side=tk.LEFT, padx=5)
+
         mid = ttk.LabelFrame(frame, text="Оставить N последних сессий", padding=10)
         mid.pack(fill=tk.X, padx=10, pady=(0, 10))
 
@@ -1105,15 +1113,7 @@ class App(tk.Tk):
             model = m.get("id", s.model)
         except:
             pass
-        # Shorten directory path
         directory = s.directory or ""
-        sep = "\\"
-        parts = directory.split(sep)
-        if len(parts) > 3:
-            if parts[0].endswith(":"):
-                directory = parts[0] + sep + "..." + sep + sep.join(parts[-2:])
-            else:
-                directory = "..." + sep + sep.join(parts[-2:])
         # Children column: for root show count, for subagent show "→", for orphan "⚠"
         if orphan:
             children_display = "⚠"
@@ -1446,10 +1446,10 @@ class App(tk.Tk):
                                           initialdir=session.directory if session.directory else "")
         if not new_dir:
             return
-        # Normalize: tkinter может вернуть forward slashes на Windows
-        if os.name == 'nt':
-            new_dir = new_dir.replace('/', '\\')
-        if new_dir == session.directory:
+        # Normalize to forward slashes for comparison
+        new_dir = new_dir.replace('\\', '/')
+        session_dir = (session.directory or '').replace('\\', '/')
+        if new_dir == session_dir:
             return
         if self.db.update_session_directory(session.id, new_dir):
             updated = self.db.get_session(session.id)
@@ -1543,6 +1543,122 @@ class App(tk.Tk):
                 self._log(f"VACUUM завершён: {self._fmt_size(before)} -> {self._fmt_size(after)} (сэкономлено {self._fmt_size(saved)})")
             else:
                 self._log("VACUUM не удался — БД может быть заблокирована")
+        threading.Thread(target=do, daemon=True).start()
+
+    def _detect_mojibake(self):
+        if self._check_opencode():
+            return
+        self._log("Сканирование заголовков на CP866 mojibake...")
+        def do():
+            try:
+                db_path = self.db._db_path
+                conn = sqlite3.connect(db_path)
+                rows = conn.execute("SELECT id, title FROM session").fetchall()
+                conn.close()
+                affected = []
+                for sid, title in rows:
+                    if not title:
+                        continue
+                    has_box = any(0x2500 <= ord(c) <= 0x257F for c in title)
+                    if not has_box:
+                        continue
+                    decoded = self._decode_cp866(title)
+                    if decoded != title and any(0x0400 <= ord(c) <= 0x04FF for c in decoded):
+                        affected.append((sid, title[:80], decoded[:80]))
+                self._log(f"Найдено {len(affected)} сессий с mojibake")
+                if not affected:
+                    return
+                msg = "\n".join(f"  {sid[:12]}... → {dec}" for _, _, dec in affected[:10])
+                if len(affected) > 10:
+                    msg += f"\n  ... и ещё {len(affected) - 10}"
+                self._log("Первые 10 исправлений:")
+                self._log(msg)
+            except Exception as e:
+                self._log(f"Ошибка: {e}")
+        threading.Thread(target=do, daemon=True).start()
+
+    def _decode_cp866(self, text):
+        if not text:
+            return text
+        cp866_map = {
+            0x0410: 0x80, 0x0411: 0x81, 0x0412: 0x82, 0x0413: 0x83,
+            0x0414: 0x84, 0x0415: 0x85, 0x0416: 0x86, 0x0417: 0x87,
+            0x0418: 0x88, 0x0419: 0x89, 0x041A: 0x8A, 0x041B: 0x8B,
+            0x041C: 0x8C, 0x041D: 0x8D, 0x041E: 0x8E, 0x041F: 0x8F,
+            0x0420: 0x90, 0x0421: 0x91, 0x0422: 0x92, 0x0423: 0x93,
+            0x0424: 0x94, 0x0425: 0x95, 0x0426: 0x96, 0x0427: 0x97,
+            0x0428: 0x98, 0x0429: 0x99, 0x042A: 0x9A, 0x042B: 0x9B,
+            0x042C: 0x9C, 0x042D: 0x9D, 0x042E: 0x9E, 0x042F: 0x9F,
+            0x0430: 0xA0, 0x0431: 0xA1, 0x0432: 0xA2, 0x0433: 0xA3,
+            0x0434: 0xA4, 0x0435: 0xA5, 0x0436: 0xA6, 0x0437: 0xA7,
+            0x0438: 0xA8, 0x0439: 0xA9, 0x043A: 0xAA, 0x043B: 0xAB,
+            0x043C: 0xAC, 0x043D: 0xAD, 0x043E: 0xAE, 0x043F: 0xAF,
+            0x2591: 0xB0, 0x2592: 0xB1, 0x2593: 0xB2, 0x2502: 0xB3,
+            0x2524: 0xB4, 0x2561: 0xB5, 0x2562: 0xB6, 0x2556: 0xB7,
+            0x2555: 0xB8, 0x2563: 0xB9, 0x2551: 0xBA, 0x2557: 0xBB,
+            0x255D: 0xBC, 0x255C: 0xBD, 0x255B: 0xBE, 0x2510: 0xBF,
+            0x2514: 0xC0, 0x2534: 0xC1, 0x252C: 0xC2, 0x251C: 0xC3,
+            0x2500: 0xC4, 0x253C: 0xC5, 0x255E: 0xC6, 0x255F: 0xC7,
+            0x255A: 0xC8, 0x2554: 0xC9, 0x2569: 0xCA, 0x2566: 0xCB,
+            0x2560: 0xCC, 0x2550: 0xCD, 0x256C: 0xCE, 0x2567: 0xCF,
+            0x2568: 0xD0, 0x2564: 0xD1, 0x2565: 0xD2, 0x2559: 0xD3,
+            0x2558: 0xD4, 0x2552: 0xD5, 0x2553: 0xD6, 0x256B: 0xD7,
+            0x256A: 0xD8, 0x2518: 0xD9, 0x250C: 0xDA, 0x2588: 0xDB,
+            0x2584: 0xDC, 0x258C: 0xDD, 0x2590: 0xDE, 0x2580: 0xDF,
+            0x0440: 0xE0, 0x0441: 0xE1, 0x0442: 0xE2, 0x0443: 0xE3,
+            0x0444: 0xE4, 0x0445: 0xE5, 0x0446: 0xE6, 0x0447: 0xE7,
+            0x0448: 0xE8, 0x0449: 0xE9, 0x044A: 0xEA, 0x044B: 0xEB,
+            0x044C: 0xEC, 0x044D: 0xED, 0x044E: 0xEE, 0x044F: 0xEF,
+            0x0401: 0xF0, 0x0451: 0xF1, 0x0404: 0xF2, 0x0454: 0xF3,
+            0x0407: 0xF4, 0x0457: 0xF5, 0x040E: 0xF6, 0x045E: 0xF7,
+            0x00B0: 0xF8, 0x2219: 0xF9, 0x00B7: 0xFA, 0x221A: 0xFB,
+            0x207F: 0xFC, 0x00B2: 0xFD, 0x25A0: 0xFE, 0x00A0: 0xFF,
+        }
+        buf = bytearray()
+        for ch in text:
+            cp = ord(ch)
+            if 0x20 <= cp <= 0x7E:
+                buf.append(cp)
+            elif cp in cp866_map:
+                buf.append(cp866_map[cp])
+            else:
+                buf.append(0x3F)
+        return buf.decode("utf-8", errors="replace")
+
+    def _fix_mojibake_gui(self):
+        if self._check_opencode():
+            return
+        if not messagebox.askyesno("Подтверждение",
+                                    "Исправить CP866 mojibake во всех заголовках сессий?\n\n"
+                                    "Будет создан backup."):
+            return
+        self._log("Исправление mojibake...")
+        def do():
+            try:
+                db_path = self.db._db_path
+                backup_dir = Path("Q:/OPENCODEBACKUP")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = backup_dir / f"opencode.backup-{ts}.db"
+                shutil.copy2(db_path, backup_path)
+                self._log(f"Backup: {backup_path}")
+
+                conn = sqlite3.connect(db_path)
+                conn.execute("PRAGMA journal_mode=WAL")
+                rows = conn.execute("SELECT id, title FROM session").fetchall()
+                fixed = 0
+                for sid, title in rows:
+                    if not title:
+                        continue
+                    decoded = self._decode_cp866(title)
+                    if decoded != title and any(0x0400 <= ord(c) <= 0x04FF for c in decoded):
+                        conn.execute("UPDATE session SET title = ? WHERE id = ?", (decoded, sid))
+                        fixed += 1
+                conn.commit()
+                conn.close()
+                self._log(f"Исправлено {fixed} заголовков")
+            except Exception as e:
+                self._log(f"Ошибка: {e}")
         threading.Thread(target=do, daemon=True).start()
 
     def _keep_latest_n(self):
@@ -1969,7 +2085,8 @@ class App(tk.Tk):
         self._p("")
         self._p("В браузере доступны:")
         self._bullet("Полная схема данных SQLite (все 7 таблиц, DDL, ER-диаграмма)")
-        self._bullet("MCP-инспектор — 6 инструментов с параметрами и примерами")
+        self._bullet("MCP-инспектор — 8 инструментов с параметрами и примерами")
+        self._bullet("Восстановление CP866 mojibake (кодировка) — MCP + GUI кнопки")
         self._bullet("30+ SQL-запросов для диагностики (архив, orphan, проекты, статистика)")
         self._bullet("Диагностика и решение проблем (20+ сценариев)")
         self._bullet("Архитектура OpenCode: Desktop vs CLI, Tauri, channel-based DB")
@@ -1996,7 +2113,7 @@ class App(tk.Tk):
         self._bullet("Перенос между проектами с каскадом на subagent")
         self._bullet("Vacuum, очистка снапшотов и orphan-diff'ов")
         self._bullet("Выбор БД из выпадающего списка (opencode*.db)")
-        self._bullet("MCP-инспектор (6 инструментов для AI-агента)")
+        self._bullet("MCP-инспектор (8 инструментов для AI-агента)")
         self._sep()
 
         self._help_text.config(state=tk.DISABLED)
@@ -2222,6 +2339,10 @@ class App(tk.Tk):
                          "Сравнение opencode.db vs opencode-dev.db"])
         self._table_row(["oc_query", "db, sql",
                          "Read-only SQL (только SELECT)"])
+        self._table_row(["oc_detect_mojibake", "db?",
+                         "Сканирование session.title на CP866 mojibake (битая кириллица)"])
+        self._table_row(["oc_fix_mojibake", "db?, confirm, dry_run?, table?",
+                         "Исправление CP866 mojibake в заголовках (требует confirm=true)"])
         self._p("")
         self._h("2.13.2 Подключение", "h2")
         self._code("  Файл: C:\\Users\\.config\\opencode\\opencode.jsonc")

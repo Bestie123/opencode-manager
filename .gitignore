@@ -7,3 +7,9 @@ dist/
 build/
 .venv/
 env/
+# recovery/incident artefacts (archived 2026-10-12 -> ../opencode-manager_archive_2026-06-21/)
+recovered_sessions/
+*.backup-*.db
+tools/_archive/
+_check_*.py
+cleanup_kiro_session.py
